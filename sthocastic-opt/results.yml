@@ -1,0 +1,49 @@
+# ==========================================================
+# = Solver Results                                         =
+# ==========================================================
+# ----------------------------------------------------------
+#   Problem Information
+# ----------------------------------------------------------
+Problem: 
+- Name: tmpqj9z6x8j
+  Lower bound: -118600.0
+  Upper bound: -118600.0
+  Number of objectives: 1
+  Number of constraints: 14
+  Number of variables: 13
+  Number of nonzeros: 31
+  Sense: minimize
+# ----------------------------------------------------------
+#   Solver Information
+# ----------------------------------------------------------
+Solver: 
+- Status: ok
+  User time: 0.01
+  Termination condition: optimal
+  Termination message: Dual simplex - Optimal\x3a Objective = -1.1860000000e+05
+  Error rc: 0
+  Time: 0.04153943061828613
+# ----------------------------------------------------------
+#   Solution Information
+# ----------------------------------------------------------
+Solution: 
+- number of solutions: 1
+  number of solutions displayed: 1
+- Gap: 0.0
+  Status: optimal
+  Message: None
+  Objective:
+    Total_Cost_Objective:
+      Value: -118600
+  Variable:
+    DevotedAcreage[CORN]:
+      Value: 80
+    DevotedAcreage[SUGAR_BEETS]:
+      Value: 300
+    DevotedAcreage[WHEAT]:
+      Value: 120
+    QuantitySubQuotaSold[SUGAR_BEETS]:
+      Value: 6000
+    QuantitySubQuotaSold[WHEAT]:
+      Value: 100
+  Constraint: No values

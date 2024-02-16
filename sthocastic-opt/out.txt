@@ -1,0 +1,45 @@
+[    0.00] Initializing mpi-sppy
+
+Welcome to IBM(R) ILOG(R) CPLEX(R) Interactive Optimizer 22.1.0.0
+  with Simplex, Mixed Integer & Barrier Optimizers
+5725-A06 5725-A29 5724-Y48 5724-Y49 5724-Y54 5724-Y55 5655-Y21
+Copyright IBM Corp. 1988, 2022.  All Rights Reserved.
+
+Type 'help' for a list of available commands.
+Type 'help' followed by a command name for more
+information on commands.
+
+CPLEX> Logfile 'cplex.log' closed.
+Logfile '/tmp/tmp249rcqm6.cplex.log' open.
+CPLEX> Problem '/tmp/tmps8c90kbr.pyomo.lp' read.
+Read time = 0.00 sec. (0.00 ticks)
+CPLEX> Problem name         : /tmp/tmps8c90kbr.pyomo.lp
+Objective sense      : Minimize
+Variables            :      36  [Nneg: 27,  Box: 9]
+Objective nonzeros   :      30
+Linear constraints   :      45  [Less: 21,  Greater: 18,  Equal: 6]
+  Nonzeros           :     102
+  RHS nonzeros       :      18
+
+Variables            : Min LB: 0.000000         Max UB: 500.0000       
+Objective nonzeros   : Min   : 3.333333         Max   : 33333.33       
+Linear constraints   :
+  Nonzeros           : Min   : 1.000000         Max   : 24.00000       
+  RHS nonzeros       : Min   : 200.0000         Max   : 100000.0       
+CPLEX> Version identifier: 22.1.0.0 | 2022-03-09 | 1a383f8ce
+Tried aggregator 1 time.
+LP Presolve eliminated 20 rows and 6 columns.
+Aggregator did 6 substitutions.
+Reduced LP has 19 rows, 24 columns, and 54 nonzeros.
+Presolve time = 0.00 sec. (0.05 ticks)
+
+Iteration log . . .
+Iteration:     1   Scaled dual infeas =           106.666667
+Iteration:     4   Dual objective     =     -27139200.000000
+
+Dual simplex - Optimal:  Objective = -1.0839000000e+05
+Solution time =    0.00 sec.  Iterations = 14 (3)
+Deterministic time = 0.09 ticks  (89.88 ticks/sec)
+
+CPLEX> Solution written to file '/tmp/tmpr_0s0_6c.cplex.sol'.
+CPLEX> EF objective: -108390.0
