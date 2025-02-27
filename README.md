@@ -4,10 +4,11 @@ Optimization deterministic algorithm for trade renewable energy and make decisio
 
 ## Preparação do ambiente de desenvolvimento H2V Trader
 
-Esta sessão tem como objetivo descrever o processo de preparação do ambiente de desenvolvimento para execução do modelo de otimização do sistema multienergético _H2V-trader_.
+Para a correta execução do modelo de otimização é necessário preparar o ambiente de desenvolvimento  com todos os seus requisitos, bibliotecas e softwares.
 
-Esse modelo foi desenvolvido para executado em ambiente de desenvolvimento Linux. Caso esteja utilizando Windows recomendadmos que faça uso de uma máquina virtual Linux (ubuntu de preferência) via WSL2.
+O modelo _h2vtrader_ foi desenvolvido para execução em ambiente de desenvolvimento Linux. Caso esteja utilizando Windows recomenda-se a utilização de uma máquina virtual com Linux (ubuntu 24.04 de preferência) via WSL2.
 
+> [!NOTE]
 > Um container Docker de desenvolvimento está sendo preparado para que todo o processo de preparação do ambiente de desenvolvido seja construído de forma automática.
 
 ## Passos de instalação de componentes
@@ -19,7 +20,7 @@ Os passos envolvidos são:
 3. Criação do ambiente virtual Python para execução do modelo de otimização;
 4. Obtenção do repositório git com o código fonte Python do modelo _H2V-Trader_;
 5. Instalação das dependências de execução do  modelo de otimização;
-6. Execução do modelo de otimização e execução de testes.
+6. Execução do modelo de otimização e realização de testes.
 
 ## 1. Obtenção e instalação do solver de otimização Cplex
 
@@ -54,6 +55,8 @@ export PATH="/opt/ibm/ILOG/CPLEX_Studio221/cplex/bin/x86-64_linux:$PATH"
 
 Primeiro realize o download da distribuição Python anaconda, que está disponível neste link: [download anaconda](https://www.anaconda.com/download). A documentação do anaconda está disponivel neste outro link: [documentacao anaconda](https://docs.anaconda.com/anaconda/install/), lá é possível encontrar os procedimentos para realizar a instalação do anaconda no sistema operacional Linux. Lembre-se de obter a versão do anaconda para Linux.
 
+## 3. Criação do ambiente virtual Python para execução do modelo de otimização
+
 Após instalado o anaconda é preciso criar um ambiente virtual do Python. Iremos utilizar para isso as facilidades disponibilizadas pelo anaconda. No terminal linux digite o seguinte comando para criar um ambiente virtual vazio baseado no Python versão 3.12:
 
 ```sh
@@ -66,12 +69,16 @@ Para ativar o ambiente virtual Python criado pelo anaconda:
 conda activate h2v-trader
 ```
 
+## 4. Obtenção do repositório git com o código fonte Python do modelo _H2V-Trader_
+
 Baixe o repositório github para o seu ambiente de desenvolvimento, usando o comando `git`:
 
 ```sh
 git clone https://github.com/grei-ufc/e-h2v-trader.git # obtem do github
 cd e-h2v-trader.git # entra no diretorio obtido do github
 ```
+
+## 5. Instalação das dependências de execução do  modelo de otimização
 
 Agora é preciso instalar as dependências Python para o projeto. As dependências estão listadas no arquivo requirements.txt:
 
@@ -84,5 +91,7 @@ Instale também o pacote `Jupyter` para poder executar o jupyter notebook com os
 ```sh
 pip install jupyter
 ```
+
+## 6. Execução do modelo de otimização e realização de testes
 
 Após a instalação é só executar o comando `jupyter-lab` no terminal de comando Linux e abrir o arquivo `h2v_opt_model_v5_def.ipynb`. Se a execução de todos os passos tiverem ocorrido com sucesso o notebook executará o modelo de otimização _H2V-Trader_ sem maiores problemas.
