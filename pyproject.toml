@@ -8,6 +8,12 @@ dependencies = [
     "matplotlib>=3.10.8",
     "mpi-sppy>=0.12.1",
     "numpy>=2.4.3",
+    "openpyxl>=3.1.5",
     "pandas>=3.0.1",
     "pyomo>=6.10.0",
+]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.5.6",
 ]
