@@ -1,0 +1,13 @@
+[project]
+name = "e-h2v-trader"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "mpi-sppy>=0.12.1",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pyomo>=6.10.0",
+]
