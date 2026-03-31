@@ -118,7 +118,10 @@ def load_and_process_scenario_data(N,
     return profiles
 
 
-def plot_scenario_results(TIME_HORIZON, s_block, s_name, initial_soc_dict, fixed_h2_price, fixed_ammonia_price):
+def plot_scenario_results(TIME_HORIZON, s_block, s_name, initial_soc_dict, fixed_h2_price, fixed_ammonia_price, 
+                          AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG, INTERVALO_HORAS, N,
+                          h2_max_soc_kg, h2_min_soc_kg, ammonia_max_soc_kg, ammonia_min_soc_kg,
+                          TX_H2_TO_AMMONIA_KG_PER_KG):
   #  print(f"\n--- Gerando gráficos para o Cenário: {s_name.upper()} ---")
     
     # Extração de resultados
