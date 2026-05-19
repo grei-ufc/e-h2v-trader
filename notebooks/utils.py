@@ -7,68 +7,162 @@ import pandas as pd
 import os
 
 
-def carregar_pld_12m(caminho_arquivo, sheet=0):
+def carregar_pld_12m(caminho_excel, n_periodos=1440):
     """
-    Carrega e processa o arquivo de PLD, renomeando colunas e tratando tipos de dados.
+    Carrega PLD, interpola para 15min e retorna colunas ['data', 'pld'].
     """
-    if not os.path.exists(caminho_arquivo):
-        raise FileNotFoundError(f"Arquivo não encontrado: {caminho_arquivo}")
-    df = pd.read_excel(caminho_arquivo, sheet_name=sheet, header=0)
-    df.columns = df.columns.map(lambda c: str(c).strip().lower())
-    if not {"hour", "spotpricebrl"}.issubset(df.columns):
-        raise ValueError(f"Esperava colunas {{'hour', 'spotpricebrl'}}, mas encontrei {set(df.columns)}.")
-    df["hour"] = pd.to_datetime(df["hour"], errors="coerce")
-    df["spotpricebrl"] = pd.to_numeric(df["spotpricebrl"], errors="coerce")
-    if df["hour"].isna().any() or df["spotpricebrl"].isna().any():
-        raise ValueError("Valores nulos ou inválidos encontrados no arquivo de PLD após a conversão.")
-    df = df.rename(columns={"hour": "data", "spotpricebrl": "pld"})
-    return df.sort_values("data").reset_index(drop=True)
+    try:
+        df = pd.read_excel(caminho_excel)
+        
+        # Força a renomeação para o que o seu notebook espera
+        # Assume-se: Coluna 0 = Data/Hora, Coluna 1 = Preço
+        df.columns = ['data', 'pld']
+        
+        df['data'] = pd.to_datetime(df['data'])
+        df['pld'] = pd.to_numeric(df['pld'], errors='coerce')
+        
+        # Define a data como índice para interpolar
+        df.set_index('data', inplace=True)
+        df_15min = df.resample('15min').interpolate(method='linear')
+        
+        # Ajusta para o horizonte de n_periodos (15 dias)
+        current_len = len(df_15min)
+        if current_len < n_periodos:
+            repeats = int(np.ceil(n_periodos / current_len))
+            new_values = np.tile(df_15min['pld'].values, repeats)[:n_periodos]
+            
+            # Cria novo índice de tempo começando do início do arquivo
+            new_index = pd.date_range(start=df_15min.index[0], periods=n_periodos, freq='15min')
+            df_result = pd.DataFrame({'pld': new_values}, index=new_index)
+        else:
+            df_result = df_15min.iloc[:n_periodos].copy()
+        
+        # IMPORTANTE: Reseta o índice para que 'data' volte a ser uma coluna
+        df_result = df_result.reset_index().rename(columns={'index': 'data'})
+        
+        return df_result
+
+    except Exception as e:
+        raise RuntimeError(f"Erro ao carregar PLD 12m: {str(e)}")
 
 
 def gerar_perfis_realistas(N, intervalo_horas, pot_solar_max_w, pot_eolica_max_w, pot_carga_max_w):
     """
-    Gera perfis sintéticos de solar, eólica e carga.
+    Gera perfis sintéticos de solar, eólica e carga para o horizonte total N.
     Esta função será usada apenas para a carga, a menos que dados reais de carga sejam fornecidos.
     """
-    horas = np.arange(0, 24, intervalo_horas)
+    # CORREÇÃO: O vetor de horas deve cobrir todo o horizonte N (15 dias)
+    # N * intervalo_horas (1440 * 0.25) resulta em 360 horas totais.
+    horas = np.arange(0, N * intervalo_horas, intervalo_horas)
+
+    # Perfil Solar Unitário
+    # O seno garante a repetição diária (ciclo de 24h) ao longo dos 15 dias.
     perfil_solar_unitario = np.maximum(0, np.sin(np.pi * (horas - 6) / 12))**1.5
     solar_gen_w = perfil_solar_unitario * pot_solar_max_w
-    perfil_eolico_unitario = (0.5 + 0.2 * np.sin(np.pi * horas / 6) + 0.3 * np.cos(np.pi * horas / 12 + np.pi/4) + 0.1 * np.random.rand(N))
+
+    # Perfil Eólico Unitário
+    # Agora o ruído aleatório np.random.rand(N) tem o mesmo tamanho (1440) que o vetor 'horas'.
+    perfil_eolico_unitario = (0.5 + 
+                              0.2 * np.sin(np.pi * horas / 6) + 
+                              0.3 * np.cos(np.pi * horas / 12 + np.pi/4) + 
+                              0.1 * np.random.rand(N))
+    
+    # Garante que os valores fiquem entre 0 e 1
     perfil_eolico_unitario = np.clip(perfil_eolico_unitario, 0, 1)
     eolica_gen_w = perfil_eolico_unitario * pot_eolica_max_w
-    perfil_carga_unitario = (0.55 - 0.25 * np.cos(2 * np.pi * (horas - 4) / 24) + 0.4 * np.exp(-0.5 * ((horas - 15) / 3.5)**2))
+
+    # Perfil de Carga Unitário
+    # O cosseno e a exponencial criam o comportamento de picos de consumo diários.
+    perfil_carga_unitario = (0.55 - 
+                             0.25 * np.cos(2 * np.pi * (horas - 4) / 24) + 
+                             0.4 * np.exp(-0.5 * ((horas - 15) / 3.5)**2))
+    
     carga_w = perfil_carga_unitario * pot_carga_max_w
+
+    # Retorna as listas convertidas para o formato esperado pelo modelo
     return solar_gen_w.tolist(), eolica_gen_w.tolist(), carga_w.tolist()
 
+
+def carregar_geracao_data(arquivo, N_intervals=1440, unit_conversion_factor=1e6, sheet_name=0):
+    """
+    Carrega dados de geração, ignora colunas de tempo/texto e replica para N_intervals.
+    """
+    if not os.path.exists(arquivo):
+        raise FileNotFoundError(f"Arquivo não encontrado: {arquivo}")
+
+    try:
+        # Lê o arquivo Excel completo
+        df = pd.read_excel(arquivo, sheet_name=sheet_name, header=None)
+        
+        # Se houver mais de uma coluna, assume que a geração está na segunda (índice 1)
+        # A primeira coluna (índice 0) geralmente contém os horários que causaram o erro.
+        coluna_alvo = 1 if df.shape[1] > 1 else 0
+        
+        # Extrai a coluna e converte para numérico
+        # O 'errors=coerce' transforma horários (datetime.time) e textos em NaN
+        dados_numericos = pd.to_numeric(df.iloc[:, coluna_alvo], errors='coerce')
+        
+        # Remove os valores nulos (cabeçalhos, horários ou linhas vazias)
+        data = dados_numericos.dropna().values
+
+        if len(data) == 0:
+            raise ValueError(f"O arquivo {arquivo} não contém dados numéricos válidos na coluna {coluna_alvo}.")
+
+        # Aplica o fator de conversão (ex: MW para W)
+        data = data * unit_conversion_factor
+
+        # Lógica de repetição (tile) para atingir exatamente N_intervals (1440 pontos)
+        n_repeats = int(np.ceil(N_intervals / len(data)))
+        perfil = np.tile(data, n_repeats)[:N_intervals]
+
+        return perfil
+
+    except Exception as e:
+        raise ValueError(f"Erro ao processar arquivo de geração '{arquivo}': {str(e)}")
+
+def load_and_process_scenario_data(N, INTERVALO_HORAS, LOAD_MAX_W, GEN_MAX_W, pld_data, solar_data, wind_data, fixed_h2_price=25.0, fixed_ammonia_price=4.27):
+    """
+    Monta os dicionários de perfis para cada cenário (optimal, good, bad).
+    AGORA UTILIZA PERFIS SOLARES E EÓLICOS DIFERENCIADOS POR CENÁRIO.
+    """
+    _, _, carga_w = gerar_perfis_realistas(N, INTERVALO_HORAS, 0, 0, LOAD_MAX_W)
     
-def carregar_geracao_data(caminho_arquivo, N_intervals, unit_conversion_factor=1e6, sheet_name=0):
-
-    if not os.path.exists(caminho_arquivo):
-        raise FileNotFoundError(f"Arquivo não encontrado: {caminho_arquivo}")
-
-    df = pd.read_excel(caminho_arquivo, sheet_name=sheet_name, header=None) # Lê sem cabeçalho inicialmente
-
-    generation_data = []
- 
-    if df.shape[0] == N_intervals: # Assume que os dados começam na linha 0
-        generation_data = df.iloc[:, 1].values # Assume que a geração está na segunda coluna (índice 1)
-    elif df.shape[0] == N_intervals + 1: # Assume que há um cabeçalho na linha 0, dados começam na linha 1
-        generation_data = df.iloc[1:, 1].values # Assume que a geração está na segunda coluna (índice 1)
-    else:
-        raise ValueError(f"O arquivo {caminho_arquivo} não contém {N_intervals} ou {N_intervals+1} linhas de dados esperadas para 96 intervalos. Encontradas {df.shape[0]} linhas.")
-
-    # Converte para numérico, tratando valores não numéricos (NaN) como 0.0
-    generation_profile = [float(x) if pd.notna(x) else 0.0 for x in generation_data]
-
-    if len(generation_profile) != N_intervals:
-        raise ValueError(f"O perfil de geração lido do arquivo {caminho_arquivo} tem {len(generation_profile)} pontos, mas {N_intervals} eram esperados.")
-
-    # Aplica o fator de conversão de unidade (MW para W)
-    converted_profile = [val * unit_conversion_factor for val in generation_profile]
-
-    return converted_profile
-
-
+    h2_price_venda_profile = [fixed_h2_price] * N
+    ammonia_price_venda_profile = [fixed_ammonia_price] * N
+    
+    profiles = {
+        'optimal': {
+            # Cenário Ótimo: PLD baixo, Solar alto, Eólico alto
+            'spot_prices_mwh': pld_data['low'],
+            'solar_gen_w': solar_data['high'],
+            'wind_gen_w': wind_data['high'],
+            'load_w': carga_w,
+            'h2_price_venda': h2_price_venda_profile,
+            'ammonia_price_venda': ammonia_price_venda_profile,
+        },
+        'good': {
+            # Cenário Bom: PLD médio, Solar médio, Eólico médio
+            'spot_prices_mwh': pld_data['mean'],
+            'solar_gen_w': solar_data['mean'],
+            'wind_gen_w': wind_data['mean'],
+            'load_w': carga_w,
+            'h2_price_venda': h2_price_venda_profile,
+            'ammonia_price_venda': ammonia_price_venda_profile,
+        },
+        'bad': {
+            # Cenário Ruim: PLD alto, Solar baixo, Eólico baixo
+            'spot_prices_mwh': pld_data['high'],
+            'solar_gen_w': solar_data['low'],
+            'wind_gen_w': wind_data['low'],
+            'load_w': carga_w,
+            'h2_price_venda': h2_price_venda_profile,
+            'ammonia_price_venda': ammonia_price_venda_profile,
+        }
+    }
+    
+    return profiles
+        
+"""
 def load_and_process_scenario_data(N,
                                    INTERVALO_HORAS,
                                    LOAD_MAX_W,
@@ -78,11 +172,7 @@ def load_and_process_scenario_data(N,
                                    wind_mean_profile,
                                    fixed_h2_price=25.0,
                                    fixed_ammonia_price=4.27):
-    """
-    Carrega e processa os dados para os diferentes cenários de otimização.
-    A geração solar e eólica utiliza sempre o perfil de média agregada.
-    A variabilidade dos cenários é definida pelos dados de PLD.
-    """
+
     print(f"--- Construindo perfis: Preço H₂ (Venda) = R$ {fixed_h2_price:.2f}/kg | Preço Amônia (Venda) = R$ {fixed_ammonia_price:.2f}/kg ---")
     
     # A carga (load_w) ainda será gerada sinteticamente, pois não há dados de carga real fornecidos.
@@ -116,227 +206,219 @@ def load_and_process_scenario_data(N,
         profiles[p_name]['h2_price_venda'] = h2_price_per_kg_venda
         profiles[p_name]['ammonia_price_venda'] = ammonia_price_per_kg_venda
     return profiles
-
+"""
 
 def plot_scenario_results(TIME_HORIZON, s_block, s_name, initial_soc_dict, fixed_h2_price, fixed_ammonia_price, 
                           AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG, INTERVALO_HORAS, N,
                           h2_max_soc_kg, h2_min_soc_kg, ammonia_max_soc_kg, ammonia_min_soc_kg,
                           TX_H2_TO_AMMONIA_KG_PER_KG):
-  #  print(f"\n--- Gerando gráficos para o Cenário: {s_name.upper()} ---")
     
-    # Extração de resultados
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import pyomo.environ as pyo
+    import seaborn as sns
+    from matplotlib.gridspec import GridSpec
+
+    # --- Aplica um tema profissional para os gráficos ---
+    sns.set_theme(style="whitegrid", palette="colorblind")
+    plt.rcParams.update({'font.family': 'serif', 'font.size': 12})
+
+    # --- 1. Extração e Preparação dos Dados ---
+    data = {
+        'Solar': np.array([pyo.value(s_block.p_solar[t]) for t in TIME_HORIZON]) / 1e6,
+        'Eólica': np.array([pyo.value(s_block.p_wind[t]) for t in TIME_HORIZON]) / 1e6,
+        'Compra da Rede': np.array([pyo.value(s_block.GRID_BUY_POWER[t]) for t in TIME_HORIZON]) / 1e6,
+        'Fuel Cell': np.array([pyo.value(s_block.P_FC_GEN[t]) for t in TIME_HORIZON]) / 1e6,
+        'Carga Industrial': -np.array([pyo.value(s_block.p_load[t]) for t in TIME_HORIZON]) / 1e6,
+        'Eletrolisador': -np.array([pyo.value(s_block.P_PROD[t] + s_block.P_START[t]) for t in TIME_HORIZON]) / 1e6,
+        'Planta de Amônia': -(np.array([pyo.value(s_block.AMMONIA_PRODUCED_MASS[t]) for t in TIME_HORIZON]) * AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG / INTERVALO_HORAS) / 1e6,
+        'Venda para Rede': -np.array([pyo.value(s_block.GRID_SELL_POWER[t]) for t in TIME_HORIZON]) / 1e6,
+        'SOC BESS': np.array([pyo.value(s_block.BESS_SOC[t]) for t in TIME_HORIZON]) / 1e6,
+        'PLD': np.array([pyo.value(s_block.price[t]) for t in TIME_HORIZON]) * 1e6,
+        'Estoque H2': np.array([pyo.value(s_block.H2_STORAGE_SOC[t]) for t in TIME_HORIZON]),
+        'Estoque Amônia': np.array([pyo.value(s_block.AMMONIA_STORAGE_SOC[t]) for t in TIME_HORIZON])
+    }
+    
+    bess_dispatch = np.diff(data['SOC BESS'], prepend=data['SOC BESS'][0]) / INTERVALO_HORAS
+
+    # --- 2. Criação da Figura com 'constrained_layout' ---
+    # A mudança principal está aqui: ativamos o novo gerenciador de layout.
+    fig = plt.figure(figsize=(18, 16), constrained_layout=True)
+    
+    gs = GridSpec(3, 1, figure=fig, height_ratios=[3, 2, 2], hspace=0.1)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax3 = fig.add_subplot(gs[2], sharex=ax1)
+    
+    fig.suptitle(f'Análise Operacional do Cenário: {s_name.upper()}', fontsize=20, fontweight='bold')
+
+    # --- 3. Painel 1: Despacho de Potência ---
+    generation_sources = ['Solar', 'Eólica', 'Compra da Rede', 'Fuel Cell']
+    consumption_sources = ['Carga Industrial', 'Eletrolisador', 'Planta de Amônia', 'Venda para Rede']
+    df_power = pd.DataFrame({k: v for k, v in data.items() if k in generation_sources + consumption_sources})
+    
+    ax1.stackplot(TIME_HORIZON, df_power[generation_sources].T, labels=generation_sources, colors=sns.color_palette("Greens_d", len(generation_sources)))
+    ax1.stackplot(TIME_HORIZON, df_power[consumption_sources].T, labels=consumption_sources, colors=sns.color_palette("Reds_d", len(consumption_sources)))
+    ax1.set_ylabel('Potência (MW)', fontsize=14, fontweight='bold')
+    ax1.axhline(0, color='black', lw=1.5, linestyle='--')
+    plt.setp(ax1.get_xticklabels(), visible=False)
+    ax1.grid(axis='y', linestyle=':', alpha=0.7)
+
+    # --- 4. Painel 2: Armazenamento de Energia e Preços ---
+    ax2.plot(TIME_HORIZON, data['SOC BESS'], color='purple', label='SOC BESS (MWh)', lw=2.5)
+    ax2.fill_between(TIME_HORIZON, ax2.get_ylim()[0], ax2.get_ylim()[1], where=bess_dispatch > 0.01, facecolor='mediumseagreen', alpha=0.2, label='BESS Carregando')
+    ax2.fill_between(TIME_HORIZON, ax2.get_ylim()[0], ax2.get_ylim()[1], where=bess_dispatch < -0.01, facecolor='lightcoral', alpha=0.2, label='BESS Descarregando')
+    ax2.set_ylabel('Energia no BESS (MWh)', fontsize=14, fontweight='bold')
+    plt.setp(ax2.get_xticklabels(), visible=False)
+    
+    ax2_pld = ax2.twinx()
+    ax2_pld.plot(TIME_HORIZON, data['PLD'], color='#333333', linestyle=':', label='PLD (R$/MWh)', alpha=0.9)
+    ax2_pld.set_ylabel('Preço PLD (R$/MWh)', fontsize=14)
+    
+    # --- 5. Painel 3: Armazenamento de Hidrogênio e Amônia ---
+    ax3.plot(TIME_HORIZON, data['Estoque H2'], color='dodgerblue', label='Estoque H2 (kg)', lw=2.5)
+    ax3.axhline(y=h2_max_soc_kg, color='dodgerblue', ls='--', alpha=0.5)
+    ax3.set_ylabel('Massa H2 (kg)', fontsize=14, fontweight='bold')
+
+    ax3_am = ax3.twinx()
+    ax3_am.plot(TIME_HORIZON, data['Estoque Amônia'], color='darkgreen', label='Estoque Amônia (kg)', lw=2.5)
+    ax3_am.axhline(y=ammonia_max_soc_kg, color='darkgreen', ls='--', alpha=0.5)
+    ax3_am.set_ylabel('Massa Amônia (kg)', fontsize=14)
+
+    # --- 6. Formatação Final ---
+    passos_por_hora = int(1 / INTERVALO_HORAS)
+    x_ticks = np.arange(0, len(TIME_HORIZON) + 1, passos_por_hora * 24)
+    x_labels = [f"Dia {int(t/(passos_por_hora*24))}" for t in x_ticks]
+    ax3.set_xticks(x_ticks)
+    ax3.set_xticklabels(x_labels, rotation=0, ha='center')
+    ax3.set_xlabel('Horizonte de Simulação', fontsize=14, fontweight='bold')
+    ax3.set_xlim(0, len(TIME_HORIZON))
+    
+    # Legenda unificada
+    lines, labels = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    lines2_pld, labels2_pld = ax2_pld.get_legend_handles_labels()
+    lines3, labels3 = ax3.get_legend_handles_labels()
+    lines3_am, labels3_am = ax3_am.get_legend_handles_labels()
+    
+    fig.legend(lines + lines2 + lines2_pld + lines3 + lines3_am,
+               labels + labels2 + labels2_pld + labels3 + labels3_am,
+               loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=5, fontsize=12, frameon=False)
+
+    # A chamada a 'tight_layout' foi removida, pois 'constrained_layout=True' já cuida disso.
+    plt.show()
+
+"""
+def plot_scenario_results(TIME_HORIZON, s_block, s_name, initial_soc_dict, fixed_h2_price, fixed_ammonia_price, 
+                          AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG, INTERVALO_HORAS, N,
+                          h2_max_soc_kg, h2_min_soc_kg, ammonia_max_soc_kg, ammonia_min_soc_kg,
+
     res_solar = np.array([pyo.value(s_block.p_solar[t]) for t in TIME_HORIZON]) / 1e6
     res_wind = np.array([pyo.value(s_block.p_wind[t]) for t in TIME_HORIZON]) / 1e6
     res_load = np.array([pyo.value(s_block.p_load[t]) for t in TIME_HORIZON]) / 1e6
-    res_elec_price = np.array([pyo.value(s_block.price[t]) for t in TIME_HORIZON]) * 1e6
     res_grid_buy = np.array([pyo.value(s_block.GRID_BUY_POWER[t]) for t in TIME_HORIZON]) / 1e6
     res_grid_sell = np.array([pyo.value(s_block.GRID_SELL_POWER[t]) for t in TIME_HORIZON]) / 1e6
-    res_bess_charge = np.array([pyo.value(s_block.BESS_CHARGE_POWER[t]) for t in TIME_HORIZON]) / 1e6
-    res_bess_discharge = np.array([pyo.value(s_block.BESS_DISCHARGE_POWER[t]) for t in TIME_HORIZON]) / 1e6
+    res_electrolyzer_consumption = np.array([pyo.value(s_block.P_PROD[t] + s_block.P_START[t]) for t in TIME_HORIZON]) / 1e6
+    res_fc_gen = np.array([pyo.value(s_block.P_FC_GEN[t]) for t in TIME_HORIZON]) / 1e6
     res_bess_soc = np.array([pyo.value(s_block.BESS_SOC[t]) for t in TIME_HORIZON]) / 1e6
-    res_electrolyzer_consumption = np.array([pyo.value(s_block.ELECTROLYZER_ELEC_CONSUMPTION[t]) for t in TIME_HORIZON]) / 1e6
-    res_thermal_generation = np.array([pyo.value(s_block.THERMAL_ELEC_GENERATION[t]) for t in TIME_HORIZON]) / 1e6
-    res_h2_produced = np.array([pyo.value(s_block.H2_PRODUCED[t]) for t in TIME_HORIZON])
+    res_elec_price = np.array([pyo.value(s_block.price[t]) for t in TIME_HORIZON]) * 1e6
     res_h2_soc = np.array([pyo.value(s_block.H2_STORAGE_SOC[t]) for t in TIME_HORIZON])
-    res_h2_to_market = np.array([pyo.value(s_block.H2_TO_MARKET_MASS[t]) for t in TIME_HORIZON])
-    res_h2_to_thermal = np.array([pyo.value(s_block.H2_TO_THERMAL_MASS[t]) for t in TIME_HORIZON])
-    res_h2_to_ammonia = np.array([pyo.value(s_block.H2_TO_AMMONIA_PLANT_MASS[t]) for t in TIME_HORIZON])
-    res_ammonia_produced = np.array([pyo.value(s_block.AMMONIA_PRODUCED_MASS[t]) for t in TIME_HORIZON])
     res_ammonia_soc = np.array([pyo.value(s_block.AMMONIA_STORAGE_SOC[t]) for t in TIME_HORIZON])
-    res_ammonia_to_market = np.array([pyo.value(s_block.AMMONIA_TO_MARKET_MASS[t]) for t in TIME_HORIZON])
+    res_ammonia_produced = np.array([pyo.value(s_block.AMMONIA_PRODUCED_MASS[t]) for t in TIME_HORIZON])
+    res_ammonia_plant_elec_mw = (res_ammonia_produced * AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG / INTERVALO_HORAS) / 1e6
     
-    # NOVO: Calcular consumo elétrico da planta de amônia (em MW)
-    res_ammonia_plant_elec_consumption_mw = np.array([
-        pyo.value(s_block.AMMONIA_PRODUCED_MASS[t]) * AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG / INTERVALO_HORAS
-        for t in TIME_HORIZON
-    ]) / 1e6 # Converter para MW
-
     passos_por_hora = int(1 / INTERVALO_HORAS)
-    x_ticks = np.arange(0, N + 1, passos_por_hora * 4)
-    x_labels = [f"{int(t/passos_por_hora):02d}:00" for t in x_ticks]
+    x_ticks = np.arange(0, len(TIME_HORIZON), passos_por_hora * 24)
+    x_labels = [f"Dia {int(t/(passos_por_hora*24)) + 1}" for t in x_ticks]
     
-    filename_base = f"resultados_h2_{fixed_h2_price:.2f}_amonia_{fixed_ammonia_price:.2f}_pld_{s_name}"
-
-    # --- Gráfico 1: Elétrico ---
-    fig1, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 16), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1.5]})
-    fig1.suptitle(f'Despacho Elétrico | Cenário PLD: {s_name.upper()}', fontsize=16)
-
-    # AX1 - Balanço Geral de Potência
-    ax1.set_title('Balanço Geral de Potência')
-    ax1.plot(TIME_HORIZON, res_solar, label='Solar', color='gold')
-    ax1.plot(TIME_HORIZON, res_wind, label='Eólica', color='deepskyblue')
-    ax1.plot(TIME_HORIZON, res_thermal_generation, label='Térmica H₂', color='darkviolet')
-    ax1.plot(TIME_HORIZON, res_grid_buy, label='Rede (Compra)', color='darkorange')
-    ax1.plot(TIME_HORIZON, -res_load, label='Carga (Demanda)', color='red', linestyle='--')
-    # ALTERAÇÃO AQUI: Legenda do Eletrolisador mais explícita
-    ax1.plot(TIME_HORIZON, -res_electrolyzer_consumption, label='Eletrolisador (p/ H₂ da Amônia)', color='magenta', linestyle='--')
-    # NOVO: Adicionar consumo elétrico da planta de amônia
-    ax1.plot(TIME_HORIZON, -res_ammonia_plant_elec_consumption_mw, label='Consumo Elétrico Planta Amônia', color='darkred', linestyle=':')
-    ax1.plot(TIME_HORIZON, -res_grid_sell, label='Rede (Venda)', color='navy', linestyle='--')
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 18), sharex=True)
+    fig.suptitle(f'Resultados da Operação com Fuel Cell - Cenário: {s_name.upper()}', fontsize=16, fontweight='bold')
     
-    # Potência do BESS unificada (descarga é positiva, carga é negativa)
-    res_bess_net_power = res_bess_discharge - res_bess_charge
-    ax1.plot(TIME_HORIZON, res_bess_net_power, label='BESS (Líquido)', color='limegreen', linewidth=2)
-    
-    ax1.axhline(0, color='black', linewidth=0.8)
+    ax1.plot(TIME_HORIZON, res_solar, label='Geração Solar', color='gold', alpha=0.7)
+    ax1.plot(TIME_HORIZON, res_wind, label='Geração Eólica', color='skyblue', alpha=0.7)
+    ax1.plot(TIME_HORIZON, res_grid_buy, label='Compra da Rede', color='orange', linestyle='--')
+    ax1.plot(TIME_HORIZON, res_fc_gen, label='Geração Fuel Cell', color='lime', linewidth=2)
+    ax1.plot(TIME_HORIZON, -res_load, label='Carga Industrial', color='red', linestyle=':')
+    ax1.plot(TIME_HORIZON, -res_electrolyzer_consumption, label='Consumo Eletrolisador', color='magenta')
+    ax1.plot(TIME_HORIZON, -res_ammonia_plant_elec_mw, label='Consumo Planta Amônia', color='brown')
+    ax1.plot(TIME_HORIZON, -res_grid_sell, label='Venda para Rede', color='navy')
     ax1.set_ylabel('Potência (MW)')
-    ax1.grid(True, linestyle=':', alpha=0.7)
-    ax1.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.)
-
-    # AX2 - Gráfico Focado na Potência de Carga e Descarga do BESS
-    ax2.set_title('Potência de Carga e Descarga do BESS')
-    # Usando área preenchida para melhor visualização
-    ax2.fill_between(TIME_HORIZON, res_bess_net_power, where=res_bess_net_power>=0, color='limegreen', alpha=0.7, interpolate=True, label='Descarga')
-    ax2.fill_between(TIME_HORIZON, res_bess_net_power, where=res_bess_net_power<=0, color='dodgerblue', alpha=0.7, interpolate=True, label='Carga')
-    ax2.axhline(0, color='black', linewidth=0.8)
-    ax2.set_ylabel('Potência (MW)')
-    ax2.grid(True, linestyle=':', alpha=0.7)
-    ax2.legend(loc='best')
-
-    # --- ADIÇÃO PARA AJUSTE DE ESCALA DO AX2 ---
-    # Verifica se há alguma atividade significativa no BESS para ajustar a escala
-    if np.any(res_bess_net_power != 0):
-        min_bess_power = np.min(res_bess_net_power)
-        max_bess_power = np.max(res_bess_net_power)
-        # Adiciona uma pequena margem para melhor visualização
-        margin = max(abs(min_bess_power), abs(max_bess_power)) * 0.1
-        if margin == 0: # Caso todos os valores sejam zero, mas não queremos erro
-            margin = 0.1 # Define uma margem mínima para evitar divisão por zero ou range zero
-        ax2.set_ylim(min_bess_power - margin, max_bess_power + margin)
-    else:
-        # Se o BESS não atua, define um limite padrão pequeno para mostrar que está plano
-        ax2.set_ylim(-0.5, 0.5) # Exemplo: +/- 0.5 MW
-    # --- FIM DA ADIÇÃO PARA AJUSTE DE ESCALA DO AX2 ---
-
-    # --- ADIÇÃO PARA DEBUG: IMPRIMIR VALORES DE BESS ---
-   # print(f"--- Valores de BESS para Cenário: {s_name.upper()} ---")
-   # print("Potência de Carga do BESS (MW):")
-   # print(res_bess_charge)
-   # print("Potência de Descarga do BESS (MW):")
-   # print(res_bess_discharge)
-   # print("Potência Líquida do BESS (MW):")
-   # print(res_bess_net_power)
-  #  print("SOC do BESS (MWh):")
-   # print(res_bess_soc)
-    # --- FIM DA ADIÇÃO PARA DEBUG ---
+    ax1.axhline(0, color='black', lw=1)
+    ax1.legend(loc='upper left', bbox_to_anchor=(1.01, 1))
+    ax1.grid(True, alpha=0.3)
     
-    # AX3 - SOC do BESS vs PLD
-    ax3.set_title('Energia Armazenada (SOC) vs. Preço da Eletricidade (PLD)')
-    ax3_twin = ax3.twinx()
-    ax3.plot(TIME_HORIZON, res_bess_soc, color='purple', linewidth=2, label='SOC da BESS (MWh)')
-    ax3.set_ylabel('Energia (MWh)', color='purple')
-    ax3.tick_params(axis='y', labelcolor='purple')
-    ax3.set_ylim(bottom=0)
-    ax3_twin.plot(TIME_HORIZON, res_elec_price, color='darkgreen', linestyle=':', label='PLD (R$/MWh)')
-    ax3_twin.set_ylabel('Preço (R$/MWh)', color='darkgreen')
-    ax3_twin.tick_params(axis='y', labelcolor='darkgreen')
-    ax3.set_xlabel('Hora do Dia')
+    ax2.plot(TIME_HORIZON, res_bess_soc, color='purple', label='SOC BESS (MWh)')
+    ax2_pld = ax2.twinx()
+    ax2_pld.plot(TIME_HORIZON, res_elec_price, color='green', linestyle=':', label='PLD (R$/MWh)', alpha=0.6)
+    ax2.set_ylabel('Energia no BESS (MWh)')
+    ax2_pld.set_ylabel('Preço PLD (R$/MWh)')
+    ax2.grid(True, alpha=0.3)
+    lines, labels = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax2_pld.get_legend_handles_labels()
+    ax2.legend(lines + lines2, labels + labels2, loc='upper left', bbox_to_anchor=(1.01, 1))
+    
+    ax3.plot(TIME_HORIZON, res_h2_soc, color='blue', label='Estoque H2 (kg)')
+    ax3_am = ax3.twinx()
+    ax3_am.plot(TIME_HORIZON, res_ammonia_soc, color='darkgreen', label='Estoque Amônia (kg)')
+    ax3.axhline(y=h2_max_soc_kg, color='blue', ls='--', alpha=0.3)
+    ax3_am.axhline(y=ammonia_max_soc_kg, color='darkgreen', ls='--', alpha=0.3)
+    ax3.set_ylabel('Massa H2 (kg)')
+    ax3_am.set_ylabel('Massa Amônia (kg)')
     ax3.set_xticks(x_ticks)
-    ax3.set_xticklabels(x_labels)
-    ax3.grid(True, linestyle=':', alpha=0.5)
-    lines, labels = ax3.get_legend_handles_labels()
-    lines2, labels2 = ax3_twin.get_legend_handles_labels()
-    ax3.legend(lines + lines2, labels + labels2, loc='best')
-
-    plt.tight_layout(rect=[0, 0, 0.88, 0.96])
-    # plt.savefig(f"{filename_base}_eletrico_final.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    # --- Gráficos de H2 e Amônia ---
-    fig2, (ax4, ax5) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-    fig2.suptitle(f'Despacho de H₂ | Preço Venda: R$ {fixed_h2_price:.2f}/kg', fontsize=16)
-    ax4.plot(TIME_HORIZON, res_h2_produced, label='H₂ Produzido', color='cyan', linestyle='-')
-    ax4.plot(TIME_HORIZON, -res_h2_to_market, label='H₂ (Venda)', color='firebrick', linestyle='--')
-    ax4.plot(TIME_HORIZON, -res_h2_to_thermal, label='H₂ p/ Térmica', color='saddlebrown', linestyle=':')
-    ax4.plot(TIME_HORIZON, -res_h2_to_ammonia, label='H₂ p/ Amônia', color='darkgreen', linestyle='--')
-    ax4.axhline(0, color='gray', linestyle='-', linewidth=0.8)
-    ax4.set_ylabel('Massa de H₂ (kg)')
-    ax4.legend(loc='best')
-    ax4.grid(True, linestyle='--', alpha=0.6)
-    ax4.set_title('Balanço de Massa de H₂ (Produção > 0, Usos < 0)')
-    ax5.plot(TIME_HORIZON, res_h2_soc, label='SOC do Tanque de H₂', color='blue', linewidth=2)
-    ax5.axhline(h2_max_soc_kg, color='r', linestyle='--', label='SOC Máximo H₂')
-    ax5.axhline(h2_min_soc_kg, color='r', linestyle=':', label='SOC Mínimo H₂')
-    ax5.axhline(initial_soc_dict['h2'], color='g', linestyle='-.', label='SOC Inicial Ótimo', linewidth=2, alpha=0.8)
-    ax5.set_ylabel('Massa de H₂ (kg)')
-    ax5.set_xlabel('Hora do Dia')
-    ax5.set_xticks(x_ticks)
-    ax5.set_xticklabels(x_labels)
-    ax5.legend(loc='best')
-    ax5.grid(True, linestyle='--', alpha=0.6)
-    ax5.set_title('Operação do Armazenamento de H₂')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # plt.savefig(f"{filename_base}_h2.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    fig3, (ax7, ax8) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-    rendimento_h2_nh3 = 1 / TX_H2_TO_AMMONIA_KG_PER_KG
-    fig3.suptitle(f'Despacho de Amônia (NH₃) | Preço: R$ {fixed_ammonia_price:.2f}/kg | Rendimento: {rendimento_h2_nh3:.2f} kg NH₃ por kg H₂', fontsize=16)
-    ax7.plot(TIME_HORIZON, res_ammonia_produced, label='Amônia Produzida', color='green', linestyle='-')
-    ax7.plot(TIME_HORIZON, -res_ammonia_to_market, label='Amônia (Venda)', color='darkred', linestyle='--')
-    ax7.axhline(0, color='gray', linestyle='-', linewidth=0.8)
-    ax7.set_ylabel('Massa (kg)')
-    ax7.legend(loc='best')
-    ax7.grid(True, linestyle='--', alpha=0.7)
-    ax7.set_title('Balanço de Massa de Amônia (Produção > 0, Usos < 0)')
-    ax8.plot(TIME_HORIZON, res_ammonia_soc, label='SOC do Tanque de Amônia', color='darkgreen', linewidth=2)
-    ax8.axhline(ammonia_max_soc_kg, color='r', linestyle='--', label='SOC Máximo NH₃')
-    ax8.axhline(ammonia_min_soc_kg, color='r', linestyle=':', label='SOC Mínimo NH₃')
-    ax8.axhline(initial_soc_dict['ammonia'], color='b', linestyle='-.', label='SOC Inicial Ótimo', linewidth=2, alpha=0.8)
-    ax8.set_ylabel('Massa de Amônia (kg)')
-    ax8.set_xlabel('Hora do Dia')
-    ax8.set_xticks(x_ticks)
-    ax8.set_xticklabels(x_labels)
-    ax8.legend(loc='best')
-    ax8.grid(True, linestyle='--', alpha=0.7)
-    ax8.set_title('Operação do Armazenamento de Amônia')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # plt.savefig(f"{filename_base}_amonia.png", dpi=300, bbox_inches='tight')
-    plt.show()
-
-    # --- NOVO GRÁFICO: Detalhes do Processo de Amônia ---
-    fig4, (ax9, ax10) = plt.subplots(2, 1, figsize=(15, 10), sharex=True)
-    fig4.suptitle(f'Detalhes do Processo de Produção de Amônia | Cenário: {s_name.upper()}', fontsize=16)
-
-    # AX9 - Consumo Elétrico para Amônia (com eixo secundário para planta de amônia)
-    ax9.set_title('Consumo Elétrico para Eletrolisador e Planta de Amônia')
-    ax9.plot(TIME_HORIZON, res_electrolyzer_consumption, label='Eletrolisador (MW)', color='magenta', linewidth=2)
-    ax9.set_ylabel('Potência Eletrolisador (MW)', color='magenta')
-    ax9.tick_params(axis='y', labelcolor='magenta')
-    ax9.grid(True, linestyle=':', alpha=0.7)
+    ax3.set_xticklabels(x_labels, rotation=45)
+    ax3.grid(True, alpha=0.3)
+    lines3, labels3 = ax3.get_legend_handles_labels()
+    lines4, labels4 = ax3_am.get_legend_handles_labels()
+    ax3.legend(lines3 + lines4, labels3 + labels4, loc='upper left', bbox_to_anchor=(1.01, 1))
     
-    ax9_twin = ax9.twinx() # Cria um eixo Y secundário
-    ax9_twin.plot(TIME_HORIZON, res_ammonia_plant_elec_consumption_mw, label='Planta de Amônia (MW)', color='darkred', linestyle='--', linewidth=2)
-    ax9_twin.set_ylabel('Potência Planta Amônia (MW)', color='darkred')
-    ax9_twin.tick_params(axis='y', labelcolor='darkred')
-
-    # Combinar legendas de ambos os eixos
-    lines, labels = ax9.get_legend_handles_labels()
-    lines2, labels2 = ax9_twin.get_legend_handles_labels()
-    ax9.legend(lines + lines2, labels + labels2, loc='best')
-
-
-    # AX10 - Balanço de Massa de H2 e Amônia no Processo
-    ax10.set_title('Massa de H₂ Consumida e Amônia Produzida')
-    ax10.plot(TIME_HORIZON, res_h2_to_ammonia, label='H₂ Consumido pela Planta Amônia (kg)', color='blue', linewidth=2)
-    ax10.plot(TIME_HORIZON, res_ammonia_produced, label='Amônia Produzida (kg)', color='green', linewidth=2)
-    ax10.set_ylabel('Massa (kg)')
-    ax10.set_xlabel('Hora do Dia')
-    ax10.set_xticks(x_ticks)
-    ax10.set_xticklabels(x_labels)
-    ax10.grid(True, linestyle=':', alpha=0.7)
-    ax10.legend(loc='best')
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # plt.savefig(f"{filename_base}_ammonia_process.png", dpi=300, bbox_inches='tight')
+    plt.tight_layout()
     plt.show()
+"""
 
-    # --- ADIÇÃO PARA DEBUG: IMPRIMIR VALORES DE CONSUMO DA PLANTA DE AMÔNIA ---
-  #   print(f"--- Valores de Consumo Elétrico da Planta de Amônia para Cenário: {s_name.upper()} ---")
-  #   print("Consumo Elétrico Planta Amônia (MW):")
-  #   print(res_ammonia_plant_elec_consumption_mw)
-  #   print("Valor máximo de Consumo Elétrico Planta Amônia (MW):", np.max(res_ammonia_plant_elec_consumption_mw))
-    # --- FIM DA ADIÇÃO PARA DEBUG ---
 
- 
-    # --- FIM DO NOVO INDICADOR ---
+def carregar_solar_real(arquivo, N, usar_ultimos_dias=True):
+    """
+    Carrega dados reais de geração solar de um arquivo Excel.
+    Calcula automaticamente quantos dias do histórico são necessários
+    com base em N (96 intervalos de 15min por dia).
+    """
+    df = pd.read_excel(arquivo, parse_dates=['time'])
+    df = df[['time', 'psolar']].sort_values('time').reset_index(drop=True)
+    
+    n_dias = ceil(N / 96)
+    pontos_horarios = int(n_dias * 24)
+    
+    if usar_ultimos_dias:
+        df_sel = df.tail(pontos_horarios)
+    else:
+        df_sel = df.head(pontos_horarios)
+    
+    df_sel = df_sel.sort_values('time').reset_index(drop=True)
+    
+    if len(df_sel) == 0:
+        raise ValueError("Dados insuficientes no arquivo para o período solicitado.")
+    
+    start_time = df_sel['time'].iloc[0]
+    
+    # Converte horas para um valor numérico (horas desde o início)
+    horas_originais = ((df_sel['time'] - start_time).dt.total_seconds() / 3600.0).values
+    psolar_vals = df_sel['psolar'].values.astype(float)
+    
+    # Cria o novo grid de tempo (N pontos de 15min)
+    horas_novas = np.arange(N) * 0.25
+    
+    # Interpolação linear
+    solar_interp = np.interp(horas_novas, horas_originais, psolar_vals)
+    
+    # Diagnóstico
+    print(f"✓ Dados solares REAIS carregados")
+    print(f"  Período do histórico usado: {start_time.strftime('%d/%m/%Y %H:%M')} a "
+          f"{df_sel['time'].iloc[-1].strftime('%d/%m/%Y %H:%M')}")
+    print(f"  {len(df_sel)} pontos horários -> {N} pontos de 15min ({n_dias} dia(s))")
+    print(f"  Média: {solar_interp.mean():.2f} W, "
+          f"Mín: {solar_interp.min():.2f} W, "
+          f"Máx: {solar_interp.max():.2f} W")
+    
+    return solar_interp
+
