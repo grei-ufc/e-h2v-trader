@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 
+import seaborn as sns
+from matplotlib.gridspec import GridSpec
+
 
 def carregar_pld_12m(caminho_excel, n_periodos=1440):
     """
@@ -212,13 +215,6 @@ def plot_scenario_results(TIME_HORIZON, s_block, s_name, initial_soc_dict, fixed
                           AMMONIA_PLANT_ELEC_CONSUMPTION_WH_PER_KG, INTERVALO_HORAS, N,
                           h2_max_soc_kg, h2_min_soc_kg, ammonia_max_soc_kg, ammonia_min_soc_kg,
                           TX_H2_TO_AMMONIA_KG_PER_KG):
-    
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import pandas as pd
-    import pyomo.environ as pyo
-    import seaborn as sns
-    from matplotlib.gridspec import GridSpec
 
     # --- Aplica um tema profissional para os gráficos ---
     sns.set_theme(style="whitegrid", palette="colorblind")
